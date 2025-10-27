@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "deimos-bcm2835",
+    "sulfur",
+]
+
+[workspace.dependencies]
