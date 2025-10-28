@@ -7,26 +7,25 @@ use crate::{
 };
 use alloc::{
     string::{String, ToString as _},
-    vec,
     vec::Vec,
 };
 use bcm2835_lpa::Peripherals;
-use bumpalo::Bump;
 use hashbrown::HashMap;
-use sulfur::dilf::{DataRef, Dst, Hole, Len, Loader, Nxt, Op, OpField, OpFieldId, OpFieldRef, Src};
+use sulfur::dilf::{DataRef, Hole, Loader, Op, OpField, OpFieldId, OpFieldRef};
 use tock_registers::LocalRegisterCopy;
 
 mod raw;
 mod registers;
+mod tests;
 
 pub fn run_all(_peri: &Peripherals) {
     unsafe {
         asm!(
             r#"
-                    mrc p15, 0, {t0}, c15, c12, 0
-                    orr {t0}, {t0}, #1
-                    mcr p15, 0, {t0}, c15, c12, 0
-                    mcr p15, 0, {z}, c15, c12, 1
+                mrc p15, 0, {t0}, c15, c12, 0
+                orr {t0}, {t0}, #1
+                mcr p15, 0, {t0}, c15, c12, 0
+                mcr p15, 0, {z}, c15, c12, 1
             "#,
             t0 = out(reg) _,
             z = in(reg) 0,
@@ -39,10 +38,11 @@ pub fn run_all(_peri: &Peripherals) {
         .iter()
         .find(|c| *c > 3)
         .expect("at least one DMA channel should be available");
-    let channel = 5;
     println!("Selected DMA channel: {}", channel);
 
-    let mut executives = vec![];
+    tests::all(channel);
+
+    // let mut executives = vec![];
 
     // for _ in 0..5 {
     //     let mut executive = Executive::new(0x10_000, 16, 16, 4);
@@ -80,69 +80,69 @@ pub fn run_all(_peri: &Peripherals) {
     //     //     timing.cycle_end - timing.cycle_begin
     //     // );
     // }
-    for _ in 0..1 {
-        let mut executive = Executive::new(0x10_000, 16, 16, 4);
-        println!("created executive");
-        let dst = executive.load_chunk(Some("dst"), 0, Layout::new::<[u8; 0x8000]>(), None);
-        println!("loaded chunk `dst` = {dst:?}");
-        let src = executive.load_chunk(Some("src"), 0, Layout::new::<[u8; 0x8000]>(), None);
-        println!("loaded chunk `src` = {src:?}");
+    // for _ in 0..1 {
+    //     let mut executive = Executive::new(0x10_000, 16, 16, 4);
+    //     println!("created executive");
+    //     let dst = executive.load_chunk(Some("dst"), 0, Layout::new::<[u8; 0x8000]>(), None);
+    //     println!("loaded chunk `dst` = {dst:?}");
+    //     let src = executive.load_chunk(Some("src"), 0, Layout::new::<[u8; 0x8000]>(), None);
+    //     println!("loaded chunk `src` = {src:?}");
 
-        println!("exec.op_count={}", executive.op_count);
+    //     println!("exec.op_count={}", executive.op_count);
 
-        unsafe { asm!("sev") };
-        // breaks at 0x75dc??? anyway
-        for i in 0..0x8000 {
-            unsafe {
-                dst.byte_add(i).write_volatile(0);
-                src.byte_add(i).write_volatile((i % 256) as u8);
-            }
-        }
-        unsafe { asm!("sev") };
-        println!("initialized `dst` and `src`");
-        executive.load_ops([Op {
-            flags: 0x5400,
-            dst: Dst {
-                data_ref: DataRef {
-                    chunk: 0,
-                    offset: 0,
-                },
-            },
-            src: Src {
-                data_ref: DataRef {
-                    chunk: 1,
-                    offset: 0,
-                },
-            },
-            len: Len { fixed: 0x8000 },
-            nxt: Nxt { hole: Hole::End },
-        }]);
-        println!("loaded operations");
-        executive.map_routine("main", 0);
-        println!("mapped routine `main`");
-        let timing = executive.execute("main", channel);
-        println!(
-            "DMA routine `main` executed in {}",
-            timing.cycle_end.wrapping_sub(timing.cycle_begin)
-        );
-        for i in 0..0x8000 {
-            assert_eq!(
-                unsafe { dst.add(i).read_volatile() },
-                unsafe { src.add(i).read_volatile() },
-                "mismatch at {i}"
-            );
-        }
-        println!("all locations okay");
-        executives.push(executive);
-    }
+    //     unsafe { asm!("sev") };
+    //     // breaks at 0x75dc??? anyway
+    //     for i in 0..0x8000 {
+    //         unsafe {
+    //             dst.byte_add(i).write_volatile(0);
+    //             src.byte_add(i).write_volatile((i % 256) as u8);
+    //         }
+    //     }
+    //     unsafe { asm!("sev") };
+    //     println!("initialized `dst` and `src`");
+    //     executive.load_ops([Op {
+    //         flags: 0x5400,
+    //         dst: Dst {
+    //             data_ref: DataRef {
+    //                 chunk: 0,
+    //                 offset: 0,
+    //             },
+    //         },
+    //         src: Src {
+    //             data_ref: DataRef {
+    //                 chunk: 1,
+    //                 offset: 0,
+    //             },
+    //         },
+    //         len: Len { fixed: 0x8000 },
+    //         nxt: Nxt { hole: Hole::End },
+    //     }]);
+    //     println!("loaded operations");
+    //     executive.map_routine("main", 0);
+    //     println!("mapped routine `main`");
+    //     let timing = executive.execute("main", channel);
+    //     println!(
+    //         "DMA routine `main` executed in {}",
+    //         timing.cycle_end.wrapping_sub(timing.cycle_begin)
+    //     );
+    //     for i in 0..0x8000 {
+    //         assert_eq!(
+    //             unsafe { dst.add(i).read_volatile() },
+    //             unsafe { src.add(i).read_volatile() },
+    //             "mismatch at {i}"
+    //         );
+    //     }
+    //     println!("all locations okay");
+    //     executives.push(executive);
+    // }
 
-    for (i, mut executive) in executives.into_iter().enumerate() {
-        let timing = executive.execute("main", channel);
-        println!(
-            "{i} - {}",
-            timing.cycle_end.wrapping_sub(timing.cycle_begin)
-        );
-    }
+    // for (i, mut executive) in executives.into_iter().enumerate() {
+    //     let timing = executive.execute("main", channel);
+    //     println!(
+    //         "{i} - {}",
+    //         timing.cycle_end.wrapping_sub(timing.cycle_begin)
+    //     );
+    // }
 }
 
 #[derive(Debug)]
@@ -163,13 +163,15 @@ pub struct Executive {
     // arena: bumpalo::Bump,
     allocation: usize,
 
-    chunk_map: Vec<(NonNull<u8>, usize)>,
+    chunk_map: Vec<(NonNull<u8>, Layout)>,
     symbol_map: HashMap<String, (NonNull<u8>, usize)>,
     routine_map: HashMap<String, usize>,
     op_count: usize,
+    op_layout: Layout,
     op_arena: NonNull<CB>,
     void: NonNull<u8>,
     void_size: usize,
+    void_layout: Layout,
 }
 #[derive(Debug, Copy, Clone)]
 pub struct Timing {
@@ -178,12 +180,26 @@ pub struct Timing {
     cycle_begin: u32,
     cycle_end: u32,
 }
+impl Timing {
+    pub fn cycles(&self) -> u32 {
+        self.cycle_end.wrapping_sub(self.cycle_begin)
+    }
+}
+impl Drop for Executive {
+    fn drop(&mut self) {
+        for (chunk, layout) in self.chunk_map.iter() {
+            unsafe { alloc::alloc::dealloc(chunk.as_ptr().cast(), *layout) }
+        }
+        unsafe { alloc::alloc::dealloc(self.op_arena.as_ptr().cast(), self.op_layout) };
+        unsafe { alloc::alloc::dealloc(self.void.as_ptr().cast(), self.void_layout) };
+    }
+}
 impl Executive {
     pub fn new(allocation: usize, op_count: usize, chunk_count: usize, max_void: usize) -> Self {
         // let arena = Bump::with_capacity(allocation);
         // println!("executive: allocated arena");
         // arena.set_allocation_limit(Some(allocation));
-        let (layout, stride) = Layout::new::<CB>()
+        let (op_layout, stride) = Layout::new::<CB>()
             .repeat(op_count)
             .expect("should not overflow");
         assert_eq!(
@@ -192,16 +208,15 @@ impl Executive {
             "stride in layout is not equal to CB size"
         );
         // println!("executive: op layout = {layout:?}");
-        let op_arena = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
+        let op_arena = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(op_layout) })
             .expect("OOM")
             .cast();
-        println!("executive: allocated op_arena = {op_arena:?}");
-        let void = NonNull::new(unsafe {
-            alloc::alloc::alloc_zeroed(Layout::from_size_align(max_void, 4).unwrap())
-        })
-        .expect("OOM")
-        .cast();
-        println!("executive: allocated void = {void:?}");
+        // println!("executive: allocated op_arena = {op_arena:?}");
+        let void_layout = Layout::from_size_align(max_void, 4).unwrap();
+        let void = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(void_layout) })
+            .expect("OOM")
+            .cast();
+        // println!("executive: allocated void = {void:?}");
 
         let chunk_map = Vec::with_capacity(chunk_count);
         // println!("executive: allocated chunk_map");
@@ -217,9 +232,11 @@ impl Executive {
             symbol_map,
             routine_map,
             op_count,
+            op_layout,
             op_arena,
             void,
             void_size: max_void,
+            void_layout,
         }
     }
 
@@ -229,8 +246,8 @@ impl Executive {
         let op_vc_addr = op_ptr.as_ptr().addr(); //self.ptr_to_vc(op_ptr.as_ptr().cast());
         let channel_base = raw::channel_ptr(channel);
 
-        println!("channel_base={channel_base:?}");
-        println!("op_vc_addr={op_vc_addr:08x}");
+        // println!("channel_base={channel_base:?}");
+        // println!("op_vc_addr={op_vc_addr:08x}");
 
         // let st_begin_hi: u32;
         // let st_begin_lo: u32;
@@ -245,9 +262,9 @@ impl Executive {
         cs_value.write(
             CS::ACTIVE::SET
                 + CS::WAIT_FOR_OUTSTANDING_WRITES::SET
-                // + CS::PRIORITY::SET
+                + CS::PRIORITY::SET
         );
-        println!("cs_value = {:08x}", cs_value.get());
+        // println!("cs_value = {:08x}", cs_value.get());
 
         unsafe { asm!("mcr p15, 0, {z}, c7, c14, 0", z = in(reg) 0) }
 
@@ -341,7 +358,7 @@ impl Executive {
 
     fn arm_to_vc(&self, arm: u32) -> u32 {
         if arm < 0x2000_0000 {
-            arm | 0x4000_0000
+            arm | 0xc000_0000
         } else if 0x2000_0000 <= arm && arm < 0x2100_0000 {
             (arm - 0x2000_0000) + 0x7e00_0000
         } else {
@@ -354,11 +371,11 @@ impl Executive {
     }
 
     fn resolve_data_ref(&self, data_ref: DataRef) -> NonNull<u8> {
-        let (chunk_base, chunk_size) = self
+        let (chunk_base, chunk_layout) = self
             .chunk_map
             .get(data_ref.chunk as usize)
             .expect("data_ref.chunk should be in-range");
-        assert!((data_ref.offset as usize) < *chunk_size);
+        assert!((data_ref.offset as usize) < chunk_layout.size());
         unsafe { chunk_base.add(data_ref.offset as usize) }
     }
 
@@ -373,13 +390,18 @@ impl Executive {
         unsafe { self.op_arena.add(op_ref as usize) }
     }
 
+    fn alloc_indirection(&mut self) -> NonNull<u32> {
+        let layout = Layout::new::<u32>();
+        let nn = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }).expect("OOM");
+        self.chunk_map.push((nn, layout));
+        nn.cast()
+    }
+
     fn allocate_op_field_ref_indirection(&mut self, op_field_ref: OpFieldRef) -> NonNull<u32> {
         let nn = self.resolve_op_field_ref(op_field_ref);
         let as_vc = self.ptr_to_vc(nn.as_ptr().cast());
-        let ind_ptr = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(Layout::new::<u32>()) })
-            .expect("OOM")
-            .cast();
-        println!("allocated OpFieldRef indirection for {op_field_ref:?} = {ind_ptr:?}");
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated OpFieldRef indirection for {op_field_ref:?} = {ind_ptr:?}");
         unsafe { ind_ptr.write_volatile(as_vc) };
         ind_ptr
     }
@@ -387,10 +409,8 @@ impl Executive {
     fn allocate_data_ref_indirection(&mut self, data_ref: DataRef) -> NonNull<u32> {
         let nn = self.resolve_data_ref(data_ref);
         let as_vc = self.ptr_to_vc(nn.as_ptr());
-        let ind_ptr = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(Layout::new::<u32>()) })
-            .expect("OOM")
-            .cast();
-        println!("allocated DataRef indirection for {data_ref:?} = {ind_ptr:?}");
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated DataRef indirection for {data_ref:?} = {ind_ptr:?}");
         unsafe { ind_ptr.write_volatile(as_vc) };
         ind_ptr
     }
@@ -398,10 +418,8 @@ impl Executive {
     fn allocate_op_ref_indirection(&mut self, op_ref: u32) -> NonNull<u32> {
         let nn = self.resolve_op_ref(op_ref);
         let as_vc = self.ptr_to_vc(nn.as_ptr().cast());
-        let ind_ptr = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(Layout::new::<u32>()) })
-            .expect("OOM")
-            .cast();
-        println!("allocated OpRef indirection for {op_ref} = {ind_ptr:?}");
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated OpRef indirection for {op_ref} = {ind_ptr:?}");
         unsafe { ind_ptr.write_volatile(as_vc) };
         ind_ptr
     }
@@ -531,7 +549,7 @@ impl Loader for Executive {
     ) -> NonNull<u8> {
         // let nn = self.arena.alloc_layout(layout);
         let nn = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }).expect("OOM");
-        println!("allocated chunk {} = {nn:?}", self.chunk_map.len());
+        // println!("allocated chunk {} = {nn:?}", self.chunk_map.len());
         if let Some(symbol) = symbol {
             self.symbol_map
                 .insert(symbol.to_string(), (nn, layout.size()));
@@ -544,19 +562,19 @@ impl Loader for Executive {
                 unsafe { nn.add(i).write_volatile(b) }
             }
         }
-        self.chunk_map.push((nn, layout.size()));
+        self.chunk_map.push((nn, layout));
         nn
     }
 
     fn load_ops<I: IntoIterator<Item = sulfur::dilf::Op>>(&mut self, ops: I) {
         for (op_idx, op) in ops.into_iter().enumerate() {
-            println!("op_idx={op_idx}, op_count={}", self.op_count);
+            // println!("op_idx={op_idx}, op_count={}", self.op_count);
             assert!(op_idx < self.op_count);
             // SAFETY: the allocation is sized for op_count CB's, so we're not going to
             // overrun the array.
             let op_mem: NonNull<CB> = unsafe { self.op_arena.add(op_idx) };
             let cb = self.translate_op(op);
-            println!("op {op_idx} -> {cb:08x?}");
+            // println!("op {op_idx} -> {cb:08x?}");
             // SAFETY: `op_arena` is properly aligned for values of type CB, and `add()`
             // will produce a pointer that is equally aligned, since we check that the stride of
             // the layout is equal to the CB size. Furthermore, we the write is valid.

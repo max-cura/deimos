@@ -121,6 +121,16 @@ pub union Dst {
     pub fixed: u32,
     pub hole: Hole,
 }
+impl Dst {
+    pub fn data_ref(chunk: usize, offset: usize) -> Self {
+        Self {
+            data_ref: DataRef {
+                chunk: chunk as u32,
+                offset: offset as u32,
+            },
+        }
+    }
+}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union Src {
@@ -132,11 +142,28 @@ pub union Src {
     pub hole: Hole,
     pub op_ref_indirect: u32,
 }
+impl Src {
+    pub fn data_ref(chunk: usize, offset: usize) -> Self {
+        Self {
+            data_ref: DataRef {
+                chunk: chunk as u32,
+                offset: offset as u32,
+            },
+        }
+    }
+}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union Len {
     pub fixed: u32,
     pub hole: Hole,
+}
+impl Len {
+    pub fn fixed(size: usize) -> Self {
+        Self {
+            fixed: size.try_into().unwrap(),
+        }
+    }
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -144,6 +171,14 @@ pub union Nxt {
     pub op_ref: u32,
     pub fixed: u32,
     pub hole: Hole,
+}
+impl Nxt {
+    pub fn end() -> Self {
+        Self { hole: Hole::End }
+    }
+    pub fn op_ref(i: usize) -> Self {
+        Self { op_ref: i as u32 }
+    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
