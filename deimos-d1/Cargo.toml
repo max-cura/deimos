@@ -1,0 +1,21 @@
+[package]
+name = "deimos-d1"
+version = "0.1.0"
+edition = "2024"
+
+# FIX: certain IDEs have issues under e.g. test configuration due to the rather exotic configuration we use
+[[bin]]
+name = "deimos-d1"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+d1-pac = "0.0.32"
+bytemuck = "1.24.0"
+critical-section = { version = "1.2.0", features = ["restore-state-u32"] }
+embedded-alloc = "0.6.0"
+tock-registers = { path = "../tock-register-interface" }
+sulfur = { path = "../sulfur" }
+hashbrown = { version = "0.15", features = [] }

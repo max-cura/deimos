@@ -40,4 +40,3 @@ _start:
     STACK_INIT = sym __stack_init,
     KERNEL_START = sym crate::__kernel_start,
 );
-

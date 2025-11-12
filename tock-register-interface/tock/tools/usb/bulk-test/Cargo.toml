@@ -1,0 +1,12 @@
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Tock Contributors 2022.
+
+[package]
+name = "bulk-test"
+version = "0.1.0"
+authors = ["Daniel B. Giffin <dbg@scs.stanford.edu>"]
+edition.workspace = true
+
+[dependencies]
+libusb = { git ="https://github.com/tock/libusb-rs" }

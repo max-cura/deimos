@@ -1,0 +1,20 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+  "-C", "link-arg=-z noexecstack",
+  "-C", "link-arg=--gc-sections",
+  "-C", "link-arg=-nostdlib",
+  "-C", "link-arg=-Tdeimos-d1/d1.ld",
+]
+runner = "./upload-d1.sh"
+linker = "riscv64-elf-ld"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[profile]
+dec.panic = "abort"
+release.panic = "abort"

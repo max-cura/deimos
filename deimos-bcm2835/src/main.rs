@@ -10,6 +10,7 @@
 extern crate alloc;
 
 use bcm2835_lpa::Peripherals;
+use sulfur::println;
 
 mod alloc_support;
 mod arch;
@@ -37,6 +38,8 @@ pub extern "C" fn __kernel_start() -> ! {
         uart::baud_to_clock_divider(115200),
     );
 
+    // sulfur::set_print_impl(Box::new(UartProxy));
+
     unsafe extern "C" {
         static __exec_end: [u32; 0];
     }
@@ -45,9 +48,9 @@ pub extern "C" fn __kernel_start() -> ! {
     unsafe {
         mmu_support::init();
         mmu_support::set_mmu_enabled_features(mmu_support::MmuConfig {
-            dcache: Some(false),
-            icache: Some(false),
-            brpdx: Some(false),
+            dcache: Some(true),
+            icache: Some(true),
+            brpdx: Some(true),
         });
     }
 
@@ -84,11 +87,16 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         println!("Panic occurred at unknown location.\n");
     }
     let msg = info.message();
-    let mut proxy = print::UartProxy::new(&peri.UART1);
-    let _ = core::fmt::write(&mut proxy, format_args!("{}\n", msg));
+    use ::core::fmt::Write as _;
+    let _ = ::core::writeln!(print::UartProxy, "{}\n", msg);
+    // let mut proxy = print::UartProxy;
+    // let _ = core::fmt::write(&mut proxy, format_args!("{}\n", msg));
+    uart::flush_tx_fifo(&peri.UART1);
 
-    // wait for UART FIFO to drain
+    // wait for UART line to drain
     timing::delay_millis(&peri.SYSTMR, 100);
+
+    arch::dsb();
 
     watchdog::restart(&peri.PM);
 }

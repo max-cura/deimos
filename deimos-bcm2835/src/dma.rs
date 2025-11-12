@@ -1,9 +1,9 @@
-use core::{alloc::Layout, arch::asm, ptr::NonNull};
+use core::{alloc::Layout, arch::asm, cell::SyncUnsafeCell, ptr::NonNull};
 
 use crate::{
     arch::dsb,
     dma::registers::{CS, TI},
-    mailbox, println,
+    mailbox,
 };
 use alloc::{
     string::{String, ToString as _},
@@ -11,12 +11,67 @@ use alloc::{
 };
 use bcm2835_lpa::Peripherals;
 use hashbrown::HashMap;
-use sulfur::dilf::{DataRef, Hole, Loader, Op, OpField, OpFieldId, OpFieldRef};
+use sulfur::{
+    Timing,
+    dilf::{DataRef, Executor, Frame, Hole, Op, OpField, OpFieldId, OpFieldRef},
+    println,
+};
 use tock_registers::LocalRegisterCopy;
 
 mod raw;
 mod registers;
 mod tests;
+
+core::arch::global_asm!(
+    r#"
+    .globl _interrupt_table
+    .align 5
+    _interrupt_table:
+        b 100f // rest 00
+        b 100f // undf 04
+        b 100f // sysc 08
+        b 100f // pabt 0c
+        b 100f // dabt 10
+        nop    //      14
+        b 100f // irq  18
+    200: // fiq
+        // bl __xxx
+        mrc p15, 0, r8, c15, c12, 1 // read cycle counter
+        str r8, [r13] // write cycle counter to FIQ_STACK + 127
+        ldr r8, =0x20007400
+        ldr r9, [r8]
+        orr r9, r9, #(1 << 2)
+        str r9, [r8]
+        mrs r9, cpsr // disable FIQ
+        orr r9, r9, #(1 << 6)
+        msr cpsr, r9
+        sev // SEV
+        subs pc, r14, #4 // return
+    100: // nothing
+        b 100b
+    "#
+);
+
+#[unsafe(no_mangle)]
+extern "C" fn __xxx() {
+    println!("hi from xxx");
+    loop {}
+}
+
+fn fiq_enable() {
+    unsafe {
+        asm!(
+            r#"
+                mrs {t0}, cpsr
+                and {t0}, {t0}, #(~(1 << 6))
+                msr cpsr, {t0}
+            "#,
+            t0 = out(reg) _
+        )
+    }
+}
+
+static FIQ_STACK: SyncUnsafeCell<[u32; 128]> = SyncUnsafeCell::new([0; 128]);
 
 pub fn run_all(_peri: &Peripherals) {
     unsafe {
@@ -29,18 +84,83 @@ pub fn run_all(_peri: &Peripherals) {
             "#,
             t0 = out(reg) _,
             z = in(reg) 0,
-        )
+        );
     }
 
     let channels = mailbox::dma_channels::query();
     println!("Available DMA channels: {}", channels);
-    let channel = channels
+    let channel_no = channels
         .iter()
         .find(|c| *c > 3)
         .expect("at least one DMA channel should be available");
-    println!("Selected DMA channel: {}", channel);
+    println!("Selected DMA channel: {}", channel_no);
 
-    tests::all(channel);
+    let fiq_no = if channel_no <= 10 {
+        16 + channel_no
+    } else {
+        27
+    };
+
+    // set up vector
+    unsafe {
+        asm!(
+            r#"
+            .extern _interrupt_table
+                ldr {t}, =_interrupt_table
+                mcr p15, 0, {t}, c12, c0, 0
+                // prefetch flush
+                mcr p15, 0, {z}, c7, c5, 4
+            "#,
+            z = in(reg) 0,
+            t = out(reg) _,
+        );
+    }
+
+    // set up FIQ buffer
+    unsafe {
+        asm!(
+            r#"
+                mrs {t0}, cpsr
+                and {t0}, {t0}, #(~0b11111)
+                orr {t0}, {t0}, #(0b10001)
+                msr cpsr, {t0}
+
+                mov r13, {t2}
+
+                mrs {t0}, cpsr
+                and {t0}, {t0}, #(~0b11111)
+                orr {t0}, {t0}, #(0b10011)
+                msr cpsr, {t0}
+
+                // cpsid f, #0b10001
+                // mov r13, {t2}
+                // msr cpsr, {t0}
+            "#,
+            t0 = out(reg) _,
+            t2 = in(reg) FIQ_STACK.get().add(127).addr()
+        )
+    }
+
+    // set up FIQ
+    unsafe {
+        asm!(
+            r#"
+                ldr {t}, =0x2000b000
+                str {fiq_ctrl}, [{t}, #0x20c]
+                mcr p15, 0, {z}, c7, c10, 4
+            "#,
+            t = out(reg) _,
+            z = in(reg) 0,
+            fiq_ctrl = in(reg) (fiq_no | 0x80),
+        );
+    }
+
+    println!("Set up FIQ machinery");
+
+    let mut channel = Channel { channel_no };
+
+    sulfur::tests::all(&mut channel, 25);
+    tests::all(&mut channel, 25)
 
     // let mut executives = vec![];
 
@@ -159,92 +279,17 @@ struct CB {
 }
 const _: () = assert!(size_of::<CB>() == 0x20);
 
-pub struct Executive {
-    // arena: bumpalo::Bump,
-    allocation: usize,
-
-    chunk_map: Vec<(NonNull<u8>, Layout)>,
-    symbol_map: HashMap<String, (NonNull<u8>, usize)>,
-    routine_map: HashMap<String, usize>,
-    op_count: usize,
-    op_layout: Layout,
-    op_arena: NonNull<CB>,
-    void: NonNull<u8>,
-    void_size: usize,
-    void_layout: Layout,
+pub struct Channel {
+    channel_no: usize,
 }
-#[derive(Debug, Copy, Clone)]
-pub struct Timing {
-    // begin: Instant,
-    // end: Instant,
-    cycle_begin: u32,
-    cycle_end: u32,
-}
-impl Timing {
-    pub fn cycles(&self) -> u32 {
-        self.cycle_end.wrapping_sub(self.cycle_begin)
-    }
-}
-impl Drop for Executive {
-    fn drop(&mut self) {
-        for (chunk, layout) in self.chunk_map.iter() {
-            unsafe { alloc::alloc::dealloc(chunk.as_ptr().cast(), *layout) }
-        }
-        unsafe { alloc::alloc::dealloc(self.op_arena.as_ptr().cast(), self.op_layout) };
-        unsafe { alloc::alloc::dealloc(self.void.as_ptr().cast(), self.void_layout) };
-    }
-}
-impl Executive {
-    pub fn new(allocation: usize, op_count: usize, chunk_count: usize, max_void: usize) -> Self {
-        // let arena = Bump::with_capacity(allocation);
-        // println!("executive: allocated arena");
-        // arena.set_allocation_limit(Some(allocation));
-        let (op_layout, stride) = Layout::new::<CB>()
-            .repeat(op_count)
-            .expect("should not overflow");
-        assert_eq!(
-            stride,
-            size_of::<CB>(),
-            "stride in layout is not equal to CB size"
-        );
-        // println!("executive: op layout = {layout:?}");
-        let op_arena = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(op_layout) })
-            .expect("OOM")
-            .cast();
-        // println!("executive: allocated op_arena = {op_arena:?}");
-        let void_layout = Layout::from_size_align(max_void, 4).unwrap();
-        let void = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(void_layout) })
-            .expect("OOM")
-            .cast();
-        // println!("executive: allocated void = {void:?}");
+impl Executor for Channel {
+    type Frame = DeviceFrame;
 
-        let chunk_map = Vec::with_capacity(chunk_count);
-        // println!("executive: allocated chunk_map");
-        let symbol_map = HashMap::new();
-        // println!("executive: allocated symbol_map");
-        let routine_map = HashMap::new();
-        // println!("executive: allocated routine_map");
-
-        Self {
-            // arena,
-            allocation,
-            chunk_map,
-            symbol_map,
-            routine_map,
-            op_count,
-            op_layout,
-            op_arena,
-            void,
-            void_size: max_void,
-            void_layout,
-        }
-    }
-
-    pub fn execute(&mut self, routine: &str, channel: usize) -> Timing {
-        let op_idx = *self.routine_map.get(routine).expect("unknown routine");
-        let op_ptr = self.resolve_op_ref(op_idx as u32);
+    fn execute(&mut self, frame: &mut DeviceFrame, routine: &str) -> Timing {
+        let op_idx = *frame.routine_map.get(routine).expect("unknown routine");
+        let op_ptr = frame.resolve_op_ref(op_idx as u32);
         let op_vc_addr = op_ptr.as_ptr().addr(); //self.ptr_to_vc(op_ptr.as_ptr().cast());
-        let channel_base = raw::channel_ptr(channel);
+        let channel_base = raw::channel_ptr(self.channel_no);
 
         // println!("channel_base={channel_base:?}");
         // println!("op_vc_addr={op_vc_addr:08x}");
@@ -266,14 +311,13 @@ impl Executive {
         );
         // println!("cs_value = {:08x}", cs_value.get());
 
-        unsafe { asm!("mcr p15, 0, {z}, c7, c14, 0", z = in(reg) 0) }
+        crate::arch::clean_and_invalidate_entire_dcache::write_raw(0);
+        // unsafe { asm!("mcr p15, 0, {z}, c7, c14, 0", z = in(reg) 0) }
 
         // crate::timing::delay_millis(&unsafe { bcm2835_lpa::Peripherals::steal() }.SYSTMR, 1000);
 
-        unsafe {
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-            dsb();
-        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        dsb();
 
         unsafe {
             asm!(
@@ -289,12 +333,31 @@ impl Executive {
 
                     mcr p15, 0, {z}, c7, c10, 4 // dsb
 
-                .align 4 // align 2^4 = 16
+                    str {z}, [{p}] // FIQ_STACK[127] <- 0
                     mcr p15, 0, {z}, c7, c10, 4 // dsb
-                    mrc p15, 0, {cc_begin}, c15, c12, 1 // read cycle counter
+                    // mrs {t0}, cpsr // enable FIQ
+                    // and {t0}, {t0}, #(~(1 << 6))
+                    // msr cpsr, {t0}
+                    mov {cc_begin}, #0 // cc_begin <- 0
+
+                    // prefetch instruction cache line
+                    ldr {t0}, =4f
+                    mcr p15, 0, {t0}, c7, c13, 1
+                    mcr p15, 0, {z}, c7, c10, 4
+                4:
+                .align 5
+                    mcr p15, 0, {z}, c15, c12, 1 // set cycle counter to 0
                     str {cs_value}, [{channel_base}, #{CS_OFFSET}] // start DMA
                 3:
+                    // wfe
+                    // mcr p15, 0, {z}, c7, c10, 4 // dsb
+                    // ldr {cc_end}, [{p}]
+                    // movs {cc_end}, {cc_end}
+                    // beq 3b
+                    
                     mcr p15, 0, {z}, c7, c10, 4 // dsb
+                    // nop
+                    // nop
                     ldr {t0}, [{channel_base}, #{CS_OFFSET}]
                     tst {t0}, #1
                     bne 3b // loop while active
@@ -307,7 +370,7 @@ impl Executive {
                     mcr p15, 0, {z}, c7, c10, 4 // dsb
                 "#,
                 z = inout(reg) 0u32 => _,
-                t0 = out(reg) _,
+                t0 = inout(reg) 0u32 => _,
 
                 // st_begin_hi = out(reg) st_begin_hi,
                 // st_begin_lo = out(reg) st_begin_lo,
@@ -319,6 +382,7 @@ impl Executive {
                 channel_base = in(reg) channel_base,
                 op_vc_addr = in(reg) op_vc_addr,
                 cs_value = in(reg) cs_value.get(),
+                p = in(reg) unsafe { FIQ_STACK.get().add(127).addr() },
                 CS_OFFSET = const 0x00,
                 CONBLK_AD_OFFSET = const 0x04,
                 DEBUG_OFFSET = const 0x20,
@@ -346,7 +410,30 @@ impl Executive {
             cycle_end,
         }
     }
+}
 
+pub struct DeviceFrame {
+    // arena: bumpalo::Bump,
+    chunk_map: Vec<(NonNull<u8>, Layout)>,
+    symbol_map: HashMap<String, (NonNull<u8>, usize)>,
+    routine_map: HashMap<String, usize>,
+    op_count: usize,
+    op_layout: Layout,
+    op_arena: NonNull<CB>,
+    void: NonNull<u8>,
+    void_size: usize,
+    void_layout: Layout,
+}
+impl Drop for DeviceFrame {
+    fn drop(&mut self) {
+        for (chunk, layout) in self.chunk_map.iter() {
+            unsafe { alloc::alloc::dealloc(chunk.as_ptr().cast(), *layout) }
+        }
+        unsafe { alloc::alloc::dealloc(self.op_arena.as_ptr().cast(), self.op_layout) };
+        unsafe { alloc::alloc::dealloc(self.void.as_ptr().cast(), self.void_layout) };
+    }
+}
+impl DeviceFrame {
     fn op_field_offset(&self, op_field_id: OpFieldId) -> usize {
         match op_field_id {
             OpFieldId::Dst => 2,
@@ -358,7 +445,7 @@ impl Executive {
 
     fn arm_to_vc(&self, arm: u32) -> u32 {
         if arm < 0x2000_0000 {
-            arm | 0xc000_0000
+            arm | 0x4000_0000
         } else if 0x2000_0000 <= arm && arm < 0x2100_0000 {
             (arm - 0x2000_0000) + 0x7e00_0000
         } else {
@@ -527,6 +614,9 @@ impl Executive {
                 + TI::DEST_INC::SET
                 + TI::SRC_INC::SET,
         );
+        if nextconbk == 0 {
+            ti.modify(TI::INTEN::SET);
+        }
 
         CB {
             ti,
@@ -539,7 +629,50 @@ impl Executive {
         }
     }
 }
-impl Loader for Executive {
+impl Frame for DeviceFrame {
+    fn new(op_count: usize, max_void: usize) -> Self {
+        // let arena = Bump::with_capacity(allocation);
+        // println!("executive: allocated arena");
+        // arena.set_allocation_limit(Some(allocation));
+        let (op_layout, stride) = Layout::new::<CB>()
+            .repeat(op_count)
+            .expect("should not overflow");
+        assert_eq!(
+            stride,
+            size_of::<CB>(),
+            "stride in layout is not equal to CB size"
+        );
+        // println!("executive: op layout = {layout:?}");
+        let op_arena = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(op_layout) })
+            .expect("OOM")
+            .cast();
+        // println!("executive: allocated op_arena = {op_arena:?}");
+        let void_layout = Layout::from_size_align(max_void, 4).unwrap();
+        let void = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(void_layout) })
+            .expect("OOM")
+            .cast();
+        // println!("executive: allocated void = {void:?}");
+
+        let chunk_map = Vec::new();
+        // println!("executive: allocated chunk_map");
+        let symbol_map = HashMap::new();
+        // println!("executive: allocated symbol_map");
+        let routine_map = HashMap::new();
+        // println!("executive: allocated routine_map");
+
+        Self {
+            chunk_map,
+            symbol_map,
+            routine_map,
+            op_count,
+            op_layout,
+            op_arena,
+            void,
+            void_size: max_void,
+            void_layout,
+        }
+    }
+
     fn load_chunk(
         &mut self,
         symbol: Option<&str>,

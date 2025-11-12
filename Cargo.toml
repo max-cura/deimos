@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "deimos-bcm2835",
+    "deimos-bcm2835", "deimos-d1",
     "sulfur",
 ]
 

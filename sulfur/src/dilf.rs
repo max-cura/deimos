@@ -151,6 +151,9 @@ impl Src {
             },
         }
     }
+    pub fn fixed_vc(addr: usize) -> Self {
+        Self { fixed: addr as u32 }
+    }
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -201,7 +204,16 @@ pub enum OpFieldId {
     Nxt = 3,
 }
 
-pub trait Loader {
+pub trait Executor {
+    type Frame: Frame;
+
+    fn execute(&mut self, frame: &mut Self::Frame, routine: &str) -> crate::Timing;
+}
+
+pub trait Frame {
+    fn new(op_count: usize, max_void: usize) -> Self
+    where
+        Self: Sized;
     // NOTE: THIS MUST BE CALLED IN THE CORRECT ORDER
     fn load_chunk(
         &mut self,
