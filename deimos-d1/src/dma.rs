@@ -1,7 +1,11 @@
+//! Notes:
+//!  Although DMA uses 34-bit addresses, we can't programmatically write the upper 2 bits from DMA
+//!  since those are embedded in bitfields in one of the other registers.
+
 use core::{alloc::Layout, ptr::NonNull};
 
 use sulfur::{
-    dilf::{Frame, Op},
+    dilf::{DataRef, Executor, Frame, Hole, Op, OpField, OpFieldId, OpFieldRef},
     println,
 };
 use tock_registers::LocalRegisterCopy;
@@ -157,7 +161,173 @@ impl Drop for DeviceFrame {
     }
 }
 impl DeviceFrame {
+    fn op_field_offset(&self, op_field_id: OpFieldId) -> usize {
+        match op_field_id {
+            OpFieldId::Dst => 2,
+            OpFieldId::Src => 1,
+            OpFieldId::Len => 3,
+            OpFieldId::Nxt => 5,
+        }
+    }
+
+    fn resolve_data_ref(&self, data_ref: DataRef) -> NonNull<u8> {
+        let (chunk_base, chunk_layout) = self
+            .chunk_map
+            .get(data_ref.chunk as usize)
+            .expect("data_ref.chunk should be in-range");
+        assert!((data_ref.offset as usize) < chunk_layout.size());
+        unsafe { chunk_base.add(data_ref.offset as usize) }
+    }
+    fn resolve_op_field_ref(&self, op_field_ref: OpFieldRef) -> NonNull<u32> {
+        let cb_ptr = self.resolve_op_ref(op_field_ref.op);
+        // assert!((op_field_ref.op as usize) < self.op_count);
+        // let cb_ptr = unsafe { self.op_arena.add(op_field_ref.op as usize) }.cast::<u32>();
+        unsafe {
+            cb_ptr
+                .cast::<u32>()
+                .add(self.op_field_offset(op_field_ref.field_id))
+        }
+    }
+    fn resolve_op_ref(&self, op_ref: u32) -> NonNull<CB> {
+        assert!((op_ref as usize) < self.op_count);
+        unsafe { self.op_arena.byte_add(op_ref as usize * self.op_stride) }
+    }
+    fn fixed_to_dma(&self, fixed: u64) -> u64 {
+        fixed
+    }
+    fn ptr_to_dma(&self, ptr: *mut u8) -> u64 {
+        ptr.expose_provenance() as u64
+    }
+
+    fn alloc_indirection(&mut self) -> NonNull<u32> {
+        let layout = Layout::new::<u32>();
+        let nn = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }).expect("OOM");
+        self.chunk_map.push((nn, layout));
+        nn.cast()
+    }
+    fn allocate_op_field_ref_indirection(&mut self, op_field_ref: OpFieldRef) -> NonNull<u32> {
+        let nn = self.resolve_op_field_ref(op_field_ref);
+        let as_dma = self.ptr_to_dma(nn.as_ptr().cast());
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated OpFieldRef indirection for {op_field_ref:?} = {ind_ptr:?}");
+        unsafe { ind_ptr.write_volatile(as_dma as u32) };
+        ind_ptr
+    }
+    fn allocate_data_ref_indirection(&mut self, data_ref: DataRef) -> NonNull<u32> {
+        let nn = self.resolve_data_ref(data_ref);
+        let as_dma = self.ptr_to_dma(nn.as_ptr());
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated DataRef indirection for {data_ref:?} = {ind_ptr:?}");
+        unsafe { ind_ptr.write_volatile(as_dma as u32) };
+        ind_ptr
+    }
+    fn allocate_op_ref_indirection(&mut self, op_ref: u32) -> NonNull<u32> {
+        let nn = self.resolve_op_ref(op_ref);
+        let as_dma = self.ptr_to_dma(nn.as_ptr().cast());
+        let ind_ptr = self.alloc_indirection();
+        // println!("allocated OpRef indirection for {op_ref} = {ind_ptr:?}");
+        unsafe { ind_ptr.write_volatile(as_dma as u32) };
+        ind_ptr
+    }
+
     fn translate_op(&mut self, op: Op) -> CB {
+        let dst = op.dst();
+        let src = op.src();
+        let len = op.len();
+        let nxt = op.nxt();
+
+        // Note to self: for non-concrete source/dest addresses, need to set hi2 bits properly
+        //
+
+        let dest_ad: u64 = match dst {
+            OpField::DataRef(data_ref) => {
+                let nn = self.resolve_data_ref(*data_ref);
+                self.ptr_to_dma(nn.as_ptr())
+            }
+            OpField::OpFieldRef(op_field_ref) => {
+                let nn = self.resolve_op_field_ref(*op_field_ref);
+                self.ptr_to_dma(nn.as_ptr().cast())
+            }
+            OpField::Fixed(fixed) => self.fixed_to_dma(*fixed as u64),
+            OpField::Hole(hole) => match hole {
+                Hole::End => unreachable!(),
+                Hole::Void => {
+                    if let OpField::Fixed(len) = len {
+                        assert!(
+                            (*len as usize) < self.void_size,
+                            "Src=!void, but transfer length is greater than void_size"
+                        );
+                        self.ptr_to_dma(self.void.as_ptr())
+                    } else {
+                        panic!("Src=!void requires fixed-length transfer")
+                    }
+                }
+                Hole::Param | Hole::Nil => *hole as u64,
+            },
+            _ => unreachable!(),
+        };
+        let source_ad = match src {
+            OpField::DataRef(data_ref) => {
+                let nn = self.resolve_data_ref(*data_ref);
+                self.ptr_to_dma(nn.as_ptr())
+            }
+            OpField::DataRefIndirect(data_ref) => {
+                let nn = self.allocate_data_ref_indirection(*data_ref);
+                self.ptr_to_dma(nn.as_ptr().cast())
+            }
+            OpField::OpFieldRef(op_field_ref) => {
+                let nn = self.resolve_op_field_ref(*op_field_ref);
+                self.ptr_to_dma(nn.as_ptr().cast())
+            }
+            OpField::OpFieldRefIndirect(op_field_ref) => {
+                let nn = self.allocate_op_field_ref_indirection(*op_field_ref);
+                self.ptr_to_dma(nn.as_ptr().cast())
+            }
+            OpField::Fixed(fixed) => self.fixed_to_dma(*fixed as u64),
+            OpField::Hole(hole) => match hole {
+                Hole::End => unreachable!(),
+                Hole::Void => {
+                    if let OpField::Fixed(len) = len {
+                        assert!(
+                            (*len as usize) < self.void_size,
+                            "Dst=!void, but transfer length is greater than void_size"
+                        );
+                        self.ptr_to_dma(self.void.as_ptr())
+                    } else {
+                        panic!("Dst=!void requires fixed-length transfer")
+                    }
+                }
+                Hole::Param | Hole::Nil => *hole as u64,
+            },
+            OpField::OpRefIndirect(op_ref) => {
+                let nn = self.allocate_op_ref_indirection(*op_ref);
+                self.ptr_to_dma(nn.as_ptr().cast())
+            }
+            _ => unreachable!(),
+        };
+        let txfr_len = match len {
+            OpField::Fixed(fixed) => *fixed,
+            OpField::Hole(hole) => match hole {
+                Hole::End => unreachable!(),
+                Hole::Void => unreachable!(),
+                Hole::Param | Hole::Nil => *hole as u32,
+            },
+            _ => unreachable!(),
+        };
+        let nextconbk = match nxt {
+            OpField::Fixed(fixed) => Link::from_addr(self.fixed_to_dma(*fixed as u64)),
+            OpField::Hole(hole) => match hole {
+                Hole::End => Link::end(),
+                Hole::Void => unreachable!(),
+                Hole::Param | Hole::Nil => Link::from_addr(*hole as u64),
+            },
+            OpField::OpRef(op_ref) => {
+                let nn = self.resolve_op_ref(*op_ref);
+                Link::from_addr(self.ptr_to_dma(nn.as_ptr().cast()))
+            }
+            _ => unreachable!(),
+        };
+
         todo!()
     }
 }
@@ -232,5 +402,16 @@ impl Frame for DeviceFrame {
     fn map_routine(&mut self, name: &str, op_idx: usize) {
         assert!(op_idx < self.op_count);
         self.routine_map.insert(name.to_string(), op_idx);
+    }
+}
+
+pub struct Channel {
+    channel_no: usize,
+}
+impl Executor for Channel {
+    type Frame = DeviceFrame;
+
+    fn execute(&mut self, frame: &mut Self::Frame, routine: &str) -> sulfur::Timing {
+        todo!()
     }
 }

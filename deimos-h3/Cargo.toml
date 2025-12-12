@@ -1,0 +1,12 @@
+[package]
+name = "deimos-h3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embedded-alloc = { version = "0.6.0", features = ["tlsf"] }
+sulfur = { path = "../sulfur" }
+critical-section = { version = "1.0", features = ["restore-state-u32"] }
+tock-registers = { path = "../tock-register-interface" }
+thiserror = { version = "1.0", package = "thiserror-core", default-features = false }
+log = { version = "0.4.27", features = [] }

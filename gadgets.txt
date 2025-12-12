@@ -1,0 +1,77 @@
+!! Add the lowest 8 bits of two operands, and write the lowest 8 bits of
+!! the sum to ?out, and the 8 bits of the sum to ?carry.
+procedure m_add_8: ?out, ?carry, ?lhs, ?rhs
+    dimension %tab_sum[0x10000]
+    dimension %tab_carry[0x10000]
+
+    dimension %lhs[4]
+    dimension %rhs[4]
+    param ?lhs %lhs[0..4]
+    param ?rhs %rhs[0..4]
+
+    dimension %t0[4]
+    dimension %tout[4]
+    dimension %tcarry[4]
+
+    %t0[0..4] = %tab_sum
+    %t0[0..1] = %lhs[0..1]
+    %t0[1..2] = %rhs[0..1]
+    \b0:src = %t0[0..4]
+b0: %tout[0..4] = !nil
+
+    %t0[0..4] = %tab_carry
+    %t0[0..1] = %lhs[0..1]
+    %t0[1..2] = %rhs[0..1]
+    \b1:src = %t0[0..4]
+b1: %tcarry[0..4] = !nil
+
+!    %t0[0..4] = #0
+!    %tout[0..4] = #0
+!    %tcarry[0..4] = #0
+!    call \m_cbbzw %t0, %rhs[0..4], %lhs[0..4]
+!    call \m_lbzw_16 %tout, %t0[0..4], %tab_sum
+!    call \m_lbzw_16 %tcarry, %t0[0..4], %tab_carry
+
+    ?out = %tout[0..4]
+    ?carry = %tcarry[0..4], ?ret
+end
+
+!! Add two 32-bit integers, write the lowest 32 bits of the sum to ?out,
+!! and the upper 32 bits to ?carry.
+procedure m_add: ?out, ?carry, ?lhs, ?rhs
+    dimension %carry0[4]
+    dimension %carry1[4]
+    dimension %carry2[4]
+    dimension %tmp[4]
+    dimension %output[8]
+    dimension %carry[4]
+    dimension %lhs[8]
+    dimension %rhs[8]
+    param ?lhs %lhs[0..4]
+    param ?rhs %rhs[0..4]
+
+    %carry0[0..4] = #0
+    %carry1[0..4] = #0
+    %carry2[0..4] = #0
+    %tmp[0..4] = #0
+    %carry[0..4] = #0
+
+    ! lhs[0] + rhs[0]
+    call \m_add_8 %output[0],  %carry2,    %lhs[0..4],     %rhs[0..4]
+    ! lhs[1] + rhs[1]
+    call \m_add_8 %tmp,        %carry1,    %lhs[1..5],     %carry2[0..4]
+    call \m_add_8 %output[1],  %carry0,    %tmp[0..4],     %rhs[1..5]
+    call \m_add_8 %carry2,     @void,      %carry0[0..4],  %carry1[0..4]
+    ! lhs[2] + rhs[2]
+    call \m_add_8 %tmp,        %carry1,    %lhs[2..6],     %carry2[0..4]
+    call \m_add_8 %output[2],  %carry0,    %tmp[0..4],     %rhs[2..6]
+    call \m_add_8 %carry2,     @void,      %carry0[0..4],  %carry1[0..4]
+    ! lhs[3] + rhs[3]
+    call \m_add_8 %tmp,        %carry1,    %lhs[3..7],     %carry2[0..4]
+    call \m_add_8 %output[3],  %carry0,    %tmp[0..4],     %rhs[3..7]
+    call \m_add_8 %carry,      @void,      %carry0[0..4],  %carry1[0..4]
+
+    ?out = %output[0..4]
+    ?carry = %carry2[0..4], ?ret
+end
+```

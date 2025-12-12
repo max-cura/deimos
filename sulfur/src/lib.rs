@@ -47,11 +47,18 @@ impl core::fmt::Write for Printer {
         Ok(())
     }
 }
-pub macro println($($arg:tt)*) {
-    {
-        use ::core::fmt::Write as _;
-        let _ = ::core::writeln!($crate::Printer, $($arg)*);
+pub macro println {
+    () => {
+        unsafe { $crate::_sulfur_write("\r\n") };
         unsafe { $crate::_sulfur_flush() };
+    },
+    ($($arg:tt)*) => {
+        {
+            use ::core::fmt::Write as _;
+            let _ = ::core::write!($crate::Printer, $($arg)*);
+            unsafe { $crate::_sulfur_write("\r\n") };
+            unsafe { $crate::_sulfur_flush() };
+        }
     }
 }
 pub macro print($($arg:tt)*) {

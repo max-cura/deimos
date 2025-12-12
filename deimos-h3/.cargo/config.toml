@@ -1,0 +1,22 @@
+[build]
+# armv7a-none-eabi is Allwinner H3
+target = "armv7a-none-eabi"
+
+[target.armv7a-none-eabi]
+rustflags = [
+    "-C", "link-arg=-z noexecstack",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-Tdeimos-h3/h3.ld",
+]
+runner = "./upload-h3.sh"
+linker = "arm-none-eabi-ld"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[profile]
+dev.panic = "abort"
+release.panic = "abort"
+
