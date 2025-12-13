@@ -186,6 +186,7 @@ impl DeviceFrame {
             cb_ptr
                 .cast::<u32>()
                 .add(self.op_field_offset(op_field_ref.field_id))
+                .byte_add(op_field_ref.offset as usize)
         }
     }
     fn resolve_op_ref(&self, op_ref: u32) -> NonNull<CB> {

@@ -1,4 +1,4 @@
-#![feature(alloc_layout_extra)]
+#![feature(alloc_layout_extra, ptr_cast_array)]
 #![feature(decl_macro)]
 #![no_std]
 

@@ -1,4 +1,4 @@
-use core::{alloc::Layout, arch::asm, cell::SyncUnsafeCell, ptr::NonNull};
+use core::{alloc::Layout, arch::asm, cell::SyncUnsafeCell, ptr::NonNull, sync::atomic::Ordering};
 
 use crate::{
     arch::dsb,
@@ -282,8 +282,107 @@ const _: () = assert!(size_of::<CB>() == 0x20);
 pub struct Channel {
     channel_no: usize,
 }
+impl Channel {
+    fn execute_contended_read(
+        &mut self,
+        frame: &mut DeviceFrame,
+        contend: *mut u32,
+        routine: &str,
+    ) -> Timing {
+        let op_idx = *frame.routine_map.get(routine).expect("unknown routine");
+        let op_ptr = frame.resolve_op_ref(op_idx as u32);
+        let op_vc_addr = op_ptr.as_ptr().addr(); //self.ptr_to_vc(op_ptr.as_ptr().cast());
+        let channel_base = raw::channel_ptr(self.channel_no);
+
+        let cycle_end: u32;
+
+        let mut cs_value: LocalRegisterCopy<u32, registers::CS::Register> =
+            LocalRegisterCopy::new(0);
+        #[rustfmt::skip]
+        cs_value.write(
+            CS::ACTIVE::SET
+                + CS::WAIT_FOR_OUTSTANDING_WRITES::SET
+                + CS::PRIORITY::SET
+        );
+        crate::arch::clean_and_invalidate_entire_dcache::write_raw(0);
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        dsb();
+
+        unsafe {
+            asm!(
+                r#"
+                    mcr p15, 0, {z}, c7, c10, 4 // dsb
+                    mcr p15, 0, {z}, c7, c14, 0 // clean & invalidate entire dcache
+                    ldr {t0}, =0x100f0002
+                    str {t0}, [{channel_base}, #{CS_OFFSET}]
+                    mov {t0}, #7
+                    str {t0}, [{channel_base}, #{DEBUG_OFFSET}]
+                    str {op_vc_addr}, [{channel_base}, #{CONBLK_AD_OFFSET}]
+                    mcr p15, 0, {z}, c7, c4, 0 // clean & invalidate entire dcache
+                    mcr p15, 0, {z}, c7, c10, 4 // dsb
+                    ldr {t0}, =4f
+                    mcr p15, 0, {t0}, c7, c13, 1
+                    mcr p15, 0, {z}, c7, c10, 4
+                .align 5
+                4:
+                    mcr p15, 0, {z}, c15, c12, 1
+                    str {cs_value}, [{channel_base}, #{CS_OFFSET}]
+                3:
+                    mcr p15, 0, {z}, c7, c6, 0 // invalidate the cache
+                    mcr p15, 0, {z}, c7, c10, 4 // dsb
+                    ldr {t0}, [{channel_base}, #{CS_OFFSET}]
+                    ldr {k}, [{contend}] // CONTENTION !!!!!!!!!!!!!!!!!!!!
+                    tst {t0}, #1
+                    bne 3b
+                    mrc p15, 0, {cyc_end}, c15, c12, 1 // cycle count
+
+                    orr {t0}, {t0}, #2
+                    str {t0}, [{channel_base}, #{CS_OFFSET}]
+                    mcr p15, 0, {z}, c7, c10, 4 // dsb
+                "#,
+                z = inout(reg) 0u32 => _,
+                t0 = inout(reg) 0u32 => _,
+                cyc_end= out(reg) cycle_end,
+                k = out(reg) _,
+
+                contend = in(reg) contend,
+
+                channel_base = in(reg) channel_base,
+                op_vc_addr = in(reg) op_vc_addr,
+                cs_value = in(reg) cs_value.get(),
+                CS_OFFSET = const 0x00,
+                CONBLK_AD_OFFSET = const 0x04,
+                DEBUG_OFFSET = const 0x20,
+            );
+        }
+
+        dsb();
+        unsafe { asm!("mcr p15, 0, {t0}, c7, c6, 0", t0 = in(reg) 0) } // invalidate entire dcache
+        dsb();
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+        Timing {
+            cycle_begin: 0,
+            cycle_end,
+        }
+    }
+}
+
 impl Executor for Channel {
     type Frame = DeviceFrame;
+
+    fn time(&self, f: impl FnOnce()) -> Timing {
+        let cycle_end: u32;
+        unsafe { asm!("mcr p15, 0, {}, c15, c12, 1", in(reg) 0) }
+        f();
+        unsafe { asm!("mrc p15, 0, {}, c15, c12, 1", out(reg) cycle_end) }
+        Timing {
+            cycle_begin: 0,
+            cycle_end,
+        }
+    }
 
     fn execute(&mut self, frame: &mut DeviceFrame, routine: &str) -> Timing {
         let op_idx = *frame.routine_map.get(routine).expect("unknown routine");
@@ -325,6 +424,7 @@ impl Executor for Channel {
                     mcr p15, 0, {z}, c7, c10, 4 // dsb
                     mcr p15, 0, {z}, c7, c14, 0 // clean and invalidate entire dcache
                     mov {t0}, #2
+                    // ldr {t0}, =0x100f0002
                     str {t0}, [{channel_base}, #{CS_OFFSET}]
                     mov {t0}, #7
                     str {t0}, [{channel_base}, #{DEBUG_OFFSET}]
@@ -418,6 +518,7 @@ pub struct DeviceFrame {
     symbol_map: HashMap<String, (NonNull<u8>, usize)>,
     routine_map: HashMap<String, usize>,
     op_count: usize,
+    ops_loaded: usize,
     op_layout: Layout,
     op_arena: NonNull<CB>,
     void: NonNull<u8>,
@@ -445,7 +546,7 @@ impl DeviceFrame {
 
     fn arm_to_vc(&self, arm: u32) -> u32 {
         if arm < 0x2000_0000 {
-            arm | 0x4000_0000
+            arm | 0x8000_0000
         } else if 0x2000_0000 <= arm && arm < 0x2100_0000 {
             (arm - 0x2000_0000) + 0x7e00_0000
         } else {
@@ -469,7 +570,11 @@ impl DeviceFrame {
     fn resolve_op_field_ref(&self, op_field_ref: OpFieldRef) -> NonNull<u32> {
         assert!((op_field_ref.op as usize) < self.op_count);
         let cb_ptr = unsafe { self.op_arena.add(op_field_ref.op as usize) }.cast::<u32>();
-        unsafe { cb_ptr.add(self.op_field_offset(op_field_ref.field_id)) }
+        unsafe {
+            cb_ptr
+                .add(self.op_field_offset(op_field_ref.field_id))
+                .byte_add(op_field_ref.offset as usize)
+        }
     }
 
     fn resolve_op_ref(&self, op_ref: u32) -> NonNull<CB> {
@@ -516,6 +621,8 @@ impl DeviceFrame {
         let src = op.src();
         let len = op.len();
         let nxt = op.nxt();
+
+        // println!("translate_op: src={src:?}");
 
         let dest_ad = match dst {
             OpField::DataRef(data_ref) => {
@@ -609,16 +716,16 @@ impl DeviceFrame {
         let mut ti = LocalRegisterCopy::new(0);
         ti.write(
             TI::NO_WIDE_BURSTS::SET
-                + TI::BURST_LENGTH::CLEAR
-                + TI::WAIT_RESP::SET
-                + TI::DEST_INC::SET
-                + TI::SRC_INC::SET,
+            + TI::BURST_LENGTH::CLEAR
+            // + TI::BURST_LENGTH::SET
+            + TI::WAIT_RESP::SET
+                + TI::DEST_INC::SET + TI::SRC_INC::SET,
         );
         if nextconbk == 0 {
             ti.modify(TI::INTEN::SET);
         }
 
-        CB {
+        let cb = CB {
             ti,
             source_ad,
             dest_ad,
@@ -626,7 +733,9 @@ impl DeviceFrame {
             stride: 0, // IGNORE
             nextconbk,
             pad: [0u32; 2], // IGNORE,
-        }
+        };
+        // println!("{cb:08x?}");
+        cb
     }
 }
 impl Frame for DeviceFrame {
@@ -665,6 +774,7 @@ impl Frame for DeviceFrame {
             symbol_map,
             routine_map,
             op_count,
+            ops_loaded: 0,
             op_layout,
             op_arena,
             void,
@@ -700,18 +810,19 @@ impl Frame for DeviceFrame {
     }
 
     fn load_ops<I: IntoIterator<Item = sulfur::dilf::Op>>(&mut self, ops: I) {
-        for (op_idx, op) in ops.into_iter().enumerate() {
+        for op in ops.into_iter() {
             // println!("op_idx={op_idx}, op_count={}", self.op_count);
-            assert!(op_idx < self.op_count);
+            assert!(self.ops_loaded < self.op_count);
             // SAFETY: the allocation is sized for op_count CB's, so we're not going to
             // overrun the array.
-            let op_mem: NonNull<CB> = unsafe { self.op_arena.add(op_idx) };
+            let op_mem: NonNull<CB> = unsafe { self.op_arena.add(self.ops_loaded) };
             let cb = self.translate_op(op);
-            // println!("op {op_idx} -> {cb:08x?}");
+            // println!("op {} -> {cb:08x?}", self.ops_loaded);
             // SAFETY: `op_arena` is properly aligned for values of type CB, and `add()`
             // will produce a pointer that is equally aligned, since we check that the stride of
             // the layout is equal to the CB size. Furthermore, we the write is valid.
             unsafe { op_mem.write_volatile(cb) };
+            self.ops_loaded += 1;
         }
     }
 

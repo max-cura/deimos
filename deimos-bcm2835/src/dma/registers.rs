@@ -44,17 +44,17 @@ tock_registers::register_bitfields! {
     ]
 }
 
-tock_registers::peripheral! {
-    #[real(DynChannel)]
-    pub Channel {
-        0x00 => cs: CS::Register { Read, Write },
-        0x04 => conblk_ad: u32 { Read, Write },
-        0x08 => ti: TI::Register { Read, Write },
-        0x0c => source_ad: u32 { Read, Write },
-        0x10 => dest_ad: u32 { Read, Write },
-        0x14 => txfr_len: u32 { Read, Write },
-        0x18 => stride: u32 { Read, Write },
-        0x1c => nextconbk: u32 { Read, Write },
-        0x20 => debug: u32 { Read, Write },
-    }
-}
+// tock_registers::peripheral! {
+//     #[real(DynChannel)]
+//     pub Channel {
+//         0x00 => cs: CS::Register { Read, Write },
+//         0x04 => conblk_ad: u32 { Read, Write },
+//         0x08 => ti: TI::Register { Read, Write },
+//         0x0c => source_ad: u32 { Read, Write },
+//         0x10 => dest_ad: u32 { Read, Write },
+//         0x14 => txfr_len: u32 { Read, Write },
+//         0x18 => stride: u32 { Read, Write },
+//         0x1c => nextconbk: u32 { Read, Write },
+//         0x20 => debug: u32 { Read, Write },
+//     }
+// }

@@ -94,7 +94,7 @@ impl Op {
         }
     }
 }
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum OpField<'op> {
     DataRef(&'op DataRef),
     DataRefIndirect(&'op DataRef),
@@ -106,7 +106,7 @@ pub enum OpField<'op> {
     OpRefIndirect(&'op u32),
 }
 #[repr(u32)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Hole {
     End = 0,
     Void = 1,
@@ -130,6 +130,15 @@ impl Dst {
             },
         }
     }
+    pub fn op_ref_field(op: usize, field_id: OpFieldId, offset: usize) -> Self {
+        Self {
+            op_ref_field: OpFieldRef {
+                op: op as u32,
+                field_id,
+                offset: offset as u32,
+            },
+        }
+    }
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -147,6 +156,15 @@ impl Src {
         Self {
             data_ref: DataRef {
                 chunk: chunk as u32,
+                offset: offset as u32,
+            },
+        }
+    }
+    pub fn op_ref_field(op: usize, field_id: OpFieldId, offset: usize) -> Self {
+        Self {
+            op_ref_field: OpFieldRef {
+                op: op as u32,
+                field_id,
                 offset: offset as u32,
             },
         }
@@ -194,6 +212,7 @@ pub struct DataRef {
 pub struct OpFieldRef {
     pub op: u32,
     pub field_id: OpFieldId,
+    pub offset: u32,
 }
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -207,6 +226,7 @@ pub enum OpFieldId {
 pub trait Executor {
     type Frame: Frame;
 
+    fn time(&self, f: impl FnOnce()) -> crate::Timing;
     fn execute(&mut self, frame: &mut Self::Frame, routine: &str) -> crate::Timing;
 }
 

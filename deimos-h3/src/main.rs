@@ -27,7 +27,6 @@ pub extern "C" fn kernel_start() {
     //     unsafe { pa_dat.write_volatile(pa_dat.read_volatile() ^ 0x8000); }
     // }
 
-    // let log_epoch = Instant::now();
     let _device = uart::Device::new_init(
         uart::RegisterBlock::from_addr(0x1c28000),
         24_000_000,
@@ -37,15 +36,6 @@ pub extern "C" fn kernel_start() {
     println!("\x1b[32m--- PNEUMA ---\x1b[0m");
 
     alloc_support::heap_init();
-
-    // log::set_logger(Box::leak(Box::new(log_support::Logger::new(log_epoch))))
-    //     .map(|()| log::set_max_level(log::LevelFilter::Trace))
-    //     .expect("failed to set logger");
-
-    // log::info!("Initializing PNEUMA system");
-
-    // ether::test();
-    // sulfur::platform::emac::linuxish::test();
 
     println!("\x1b[32m--- PNEUMA END ---\x1b[0m");
 
